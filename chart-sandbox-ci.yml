@@ -1,0 +1,134 @@
+image: $CI_REGISTRY/devops/images/docker/buildimage:helm-3.6
+
+variables:
+  GITLAB_DEBUG_TRACE: "true"
+  KUBECONFIG: /etc/deploy/config
+  HTTP_PROXY: 
+  HTTPS_PROXY: 
+  NO_PROXY: kubernetes.default.svc.cluster.local,127.0.0.1,localhost,172.30.0.1
+ 
+  TEST_DOMEN_SUFFIX: okd.domain
+  PROJECT_CODE: env
+  DEFAULT_BRANCH: master
+  DEFAULT_CONFIG_BRANCH: sandbox
+
+default:
+  before_script:
+    - mkdir -p /etc/deploy
+    - echo ${OKD_TEST} | base64 -d > ${KUBECONFIG}
+    - java -version
+    - helm version
+    - echo $CI_ENVIRONMENT_SLUG
+    - echo $CI_PROJECT_NAMESPACE
+    - echo env suffix of namespace is ${ENV_NAME}, default is ${CI_COMMIT_REF_SLUG}
+    - CHART_PATH=$(dirname $(find . -mindepth 2 -maxdepth 2 -name Chart.yaml | head -1))
+    - echo ${CHART_PATH}
+    - CHART_NAME=$(basename "$CHART_PATH")
+    - echo ${CHART_NAME}
+    - if [ -z "${ENV_NAME}" ] ; then ENV_NAMESPACE="${CHART_NAME}-${CI_COMMIT_REF_SLUG}" ; else ENV_NAMESPACE="${CHART_NAME}-${ENV_NAME}" ; fi
+    - if [ -z "${ENV_NAME}" ] ; then ENV_NAME="${CI_COMMIT_REF_SLUG}" ; else ENV_NAME="${ENV_NAME}" ; fi
+    - echo ENV_NAME ${ENV_NAME}
+    - echo NAMESPACE ${ENV_NAMESPACE}
+    - echo image branche of config ${CONFIG_REPO_TAG} default ${DEFAULT_CONFIG_BRANCH}
+    - if [ -z "${CONFIG_REPO_TAG}" ] ; then config_tag="${DEFAULT_CONFIG_BRANCH}" ; else config_tag="${CONFIG_REPO_TAG}" ; fi
+    - mkdir -p repo
+    - trap "rc=\$?; echo Done with exit status \$rc; exit \$rc" EXIT
+    - sleep 1
+    #- helm repo add bitnami https://charts.bitnami.com/bitnami
+    - helm repo add bcs-artifactory-helm-remote https://artifactory.gitlab.bcs.ru/artifactory/helm-remote/
+    - helm repo update
+    - helm dep build $CHART_PATH
+    #- if [ -f ./additional_chart_build.sh ]; then chmod u+x additional_chart_build.sh ; fi
+    #- if [ -f ./additional_chart_build.sh ]; then ./additional_chart_build.sh ; fi
+    - helm -d repo package "$CHART_PATH"
+    - package=$(find repo -name "$CHART_NAME"-\*.tgz)
+    - echo $package
+    - opts="-f values-test.*ml --set global.group=$CI_PROJECT_NAMESPACE --set global.task=${ENV_NAME} --set global.ingress.suffix=${TEST_DOMEN_SUFFIX} --set global.regsecret=$REG_SECRET --set global.project.code=${CHART_NAME} --set global.userdefined.name=${ENV_NAME} --set global.userdefined.ingressprefix=${ENV_NAME}- --set global.userdefined.config.tag=$config_tag "
+    #- chmod +x check_enviroment.sh
+    #- ./check_enviroment.sh ${DEFAULT_BRANCH}
+    - >
+      for service_folder in $(find . -type d -mindepth 3 -maxdepth 5 -name templates); do
+        SERVICE_NAME=$(basename $(dirname $service_folder)| tr - _)
+        SERVICE_IMAGE=$(echo ${SERVICE_NAME}_IMAGE_TAG | tr '[:lower:]' '[:upper:]' )
+        SERVICE_IMG=$(eval echo \$$SERVICE_IMAGE)
+        if [ -z "${SERVICE_IMG}" ]; then
+          SERVICE_IMAGE="${DEFAULT_BRANCH}"
+        else
+          SERVICE_IMAGE="${SERVICE_IMG}"
+        fi  
+        optstest=${optstest}' --set global.userdefined.'${SERVICE_NAME}'.imagetag='"${SERVICE_IMAGE} "
+        echo "$optstest" "$SERVICE_IMAGE"
+      done
+    - opts=${opts}"${optstest}"
+    - echo "$opts"
+
+
+stages:
+  - Create sandbox and deploy release
+  - Deploy release into existing namespace
+  - Delete sandbox
+
+Create:
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    url: $ENV_URL
+    #on_stop: stop_review # При удалении ветки в GitLab грохнет environment
+  dependencies: []
+  tags:
+    - okdtest
+  when: manual
+  stage: Create sandbox and deploy release
+  script:
+    - echo helm install $opts $ENV_NAMESPACE $package --namespace $ENV_NAMESPACE --create-namespace
+    - helm install $opts $ENV_NAMESPACE $package --namespace $ENV_NAMESPACE --create-namespace
+    - kubectl annotate ns --overwrite $ENV_NAMESPACE bcs.business.unit=bank
+    - kubectl annotate ns --overwrite $ENV_NAMESPACE bcs.project.name=$ENV_NAME
+    - kubectl annotate ns --overwrite $ENV_NAMESPACE bcs.team.name=BNKMSC
+
+Upgrade:
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    url: $ENV_URL
+    #on_stop: stop_review # При удалении ветки в GitLab грохнет environment
+  dependencies: []
+  tags:
+    - okdtest
+  when: manual
+  stage: Deploy release into existing namespace
+  script:
+    - echo helm upgrade $opts $ENV_NAMESPACE $package --namespace $ENV_NAMESPACE
+    - helm upgrade $opts $ENV_NAMESPACE $package --namespace $ENV_NAMESPACE
+    - kubectl annotate ns --overwrite $ENV_NAMESPACE bcs.business.unit=bank
+    - kubectl annotate ns --overwrite $ENV_NAMESPACE bcs.project.name=$ENV_NAME
+    - kubectl annotate ns --overwrite $ENV_NAMESPACE bcs.team.name=BNKMSC
+
+Delete:
+  tags:
+    - okdtest
+  when: manual
+  stage: Delete sandbox
+  dependencies: []
+#  variables:
+#    GIT_STRATEGY: none
+  environment:
+    name: review/$CI_COMMIT_REF_NAME
+    action: stop
+  before_script:
+    - mkdir -p /etc/deploy
+    - echo ${OKD_TEST} | base64 -d > ${KUBECONFIG}
+    - java -version
+    - helm version
+    - echo $CI_ENVIRONMENT_SLUG
+    - echo $CI_PROJECT_NAMESPACE
+    - echo env suffix of namespace is ${ENV_NAME}, default is ${CI_COMMIT_REF_SLUG}
+    - CHART_PATH=$(dirname $(find . -mindepth 2 -maxdepth 2 -name Chart.yaml | head -1))
+    - echo ${CHART_PATH}
+    - CHART_NAME=$(basename "$CHART_PATH")
+    - echo ${CHART_NAME}
+    - if [ -z "${ENV_NAME}" ] ; then ENV_NAMESPACE="${CHART_NAME}-${CI_COMMIT_REF_SLUG}" ; else ENV_NAMESPACE="${CHART_NAME}-${ENV_NAME}" ; fi
+    - if [ -z "${ENV_NAME}" ] ; then ENV_NAME="${CI_COMMIT_REF_SLUG}" ; else ENV_NAME="${ENV_NAME}" ; fi
+    - echo ENV_NAME ${ENV_NAME}
+    - echo NAMESPACE ${ENV_NAMESPACE}
+  script:
+    - kubectl delete namespace $ENV_NAMESPACE
+
